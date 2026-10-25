@@ -1,0 +1,6 @@
+streamlit>=1.40.0
+google-genai>=0.1.1
+
+# Speech transcription engine (C++ CTranslate2 runtime with NVIDIA CUDA GPU acceleration & CPU fallback)
+faster-whisper>=1.0.0
+av==14.2.0

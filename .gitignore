@@ -1,0 +1,51 @@
+# Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Python caches & artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# ClipForge media, temporary & generated outputs
+downloads/
+output/
+temp/
+tmp/
+*.mp4
+*.mkv
+*.webm
+*.avi
+*.mov
+*.mp3
+*.wav
+*.aac
+*.flac
+*.srt
+*.vtt
+exports/
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs & caches
+*.log
+.cache/
