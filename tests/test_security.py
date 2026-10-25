@@ -185,6 +185,142 @@ class TestSecuritySessionCleanup(unittest.TestCase):
             # Models dir must be preserved
             self.assertTrue(models_dir.exists())
 
+    def test_init_session_workspace_isolation(self):
+        from src.storage import init_session_workspace
+
+        with tempfile.TemporaryDirectory() as tmp_dir_str:
+            base_temp = Path(tmp_dir_str) / "temp"
+            base_exports = Path(tmp_dir_str) / "exports"
+
+            sess_a_temp, sess_a_exp = init_session_workspace(base_temp, base_exports, "sess_user_alpha")
+            sess_b_temp, sess_b_exp = init_session_workspace(base_temp, base_exports, "sess_user_beta")
+
+            self.assertNotEqual(sess_a_temp, sess_b_temp)
+            self.assertNotEqual(sess_a_exp, sess_b_exp)
+            self.assertTrue(sess_a_temp.is_dir())
+            self.assertTrue(sess_b_temp.is_dir())
+
+            # Write file in user A's temp
+            (sess_a_temp / "clip_a.mp4").write_text("user_a_data")
+            self.assertTrue((sess_a_temp / "clip_a.mp4").exists())
+            self.assertFalse((sess_b_temp / "clip_a.mp4").exists())
+
+    def test_cleanup_symlink_target_safety(self):
+        import time
+        import os
+        from src.storage import cleanup_stale_files
+
+        with tempfile.TemporaryDirectory() as tmp_dir_str:
+            base_temp = Path(tmp_dir_str) / "temp"
+            base_temp.mkdir()
+
+            external_dir = Path(tmp_dir_str) / "external_system_dir"
+            external_dir.mkdir()
+            critical_file = external_dir / "critical.txt"
+            critical_file.write_text("critical external data")
+
+            # Create symlink inside base_temp pointing to external dir
+            symlink_dir = base_temp / "fake_session_symlink"
+            symlink_dir.symlink_to(external_dir)
+
+            two_hours_ago = time.time() - 7200
+            os.utime(external_dir, (two_hours_ago, two_hours_ago))
+
+            # Run cleanup
+            cleanup_stale_files(base_dirs=[base_temp], max_age_seconds=3600)
+
+            # Critical external data must NEVER be deleted
+            self.assertTrue(critical_file.exists())
+            self.assertEqual(critical_file.read_text(), "critical external data")
+
+    def test_cleanup_unlinks_stale_symlink_itself(self):
+        import time
+        import os
+        from src.storage import cleanup_stale_files
+
+        with tempfile.TemporaryDirectory() as tmp_dir_str:
+            base_temp = Path(tmp_dir_str) / "temp"
+            base_temp.mkdir()
+
+            external_dir = Path(tmp_dir_str) / "external_dir"
+            external_dir.mkdir()
+            (external_dir / "data.txt").write_text("keep_me")
+
+            # Create symlink
+            symlink = base_temp / "stale_symlink"
+            symlink.symlink_to(external_dir)
+
+            two_hours_ago = time.time() - 7200
+            os.utime(symlink, (two_hours_ago, two_hours_ago), follow_symlinks=False)
+
+            removed = cleanup_stale_files(base_dirs=[base_temp], max_age_seconds=3600)
+            self.assertEqual(removed, 1)
+            # Symlink itself is gone
+            self.assertFalse(symlink.exists(follow_symlinks=False))
+            # External dir and content remain untouched
+            self.assertTrue(external_dir.exists())
+            self.assertTrue((external_dir / "data.txt").exists())
+
+    def test_cleanup_preserves_active_session_ids(self):
+        import time
+        import os
+        from src.storage import cleanup_stale_files
+
+        with tempfile.TemporaryDirectory() as tmp_dir_str:
+            base_temp = Path(tmp_dir_str) / "temp"
+            base_temp.mkdir()
+
+            active_dir = base_temp / "active_user_sess_123"
+            active_dir.mkdir()
+            (active_dir / "upload.mp4").write_text("active_data")
+
+            # Make active dir artificially older than 1 hr
+            two_hours_ago = time.time() - 7200
+            os.utime(active_dir, (two_hours_ago, two_hours_ago))
+
+            # Cleanup with active session protection
+            cleanup_stale_files(
+                base_dirs=[base_temp],
+                max_age_seconds=3600,
+                active_session_ids=["active_user_sess_123"],
+            )
+
+            # Active session must NOT be deleted
+            self.assertTrue(active_dir.exists())
+            self.assertTrue((active_dir / "upload.mp4").exists())
+
+    def test_resource_concurrency_slot(self):
+        from src.storage import acquire_job_slot, CapacityExceededError, MAX_CONCURRENT_HEAVY_JOBS
+
+        slots = []
+        try:
+            # Exhaust all slots
+            for _ in range(MAX_CONCURRENT_HEAVY_JOBS):
+                cm = acquire_job_slot(timeout=1.0)
+                cm.__enter__()
+                slots.append(cm)
+
+            # Next acquisition must fail with CapacityExceededError
+            with self.assertRaises(CapacityExceededError):
+                with acquire_job_slot(timeout=0.1):
+                    pass
+        finally:
+            # Release all acquired slots
+            for cm in slots:
+                cm.__exit__(None, None, None)
+
+    def test_check_disk_space_available(self):
+        from src.storage import check_disk_space_available
+
+        is_ok, free_b, total_b = check_disk_space_available(Path("."), min_free_bytes=100)
+        self.assertTrue(is_ok)
+        self.assertGreater(free_b, 0)
+        self.assertGreater(total_b, 0)
+
+        # Huge requirement (e.g. 1000 Terabytes) must return False
+        is_ok_huge, _, _ = check_disk_space_available(Path("."), min_free_bytes=10**16)
+        self.assertFalse(is_ok_huge)
+
 
 if __name__ == "__main__":
     unittest.main()

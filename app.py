@@ -27,9 +27,15 @@ from src.framing import (
     reframe_video,
 )
 from src.storage import (
+    acquire_job_slot,
     calculate_dir_size_str,
+    check_disk_space_available,
     cleanup_stale_files,
     init_session_workspace,
+    CapacityExceededError,
+    DEFAULT_MAX_UPLOAD_MB,
+    DEFAULT_MAX_VIDEO_DURATION_SECONDS,
+    DEFAULT_MIN_FREE_DISK_BYTES,
 )
 from src.providers.base import (
     HighlightCandidate,
@@ -69,247 +75,543 @@ st.set_page_config(
 # Initialize isolated session workspace
 if "session_id" not in st.session_state:
     st.session_state["session_id"] = uuid.uuid4().hex[:12]
-    # Run stale cleanup once on session start
-    cleanup_stale_files(base_dirs=[BASE_TEMP_DIR, BASE_EXPORTS_DIR], max_age_seconds=3600)
+    # Run stale cleanup once on session start, protecting current session
+    cleanup_stale_files(
+        base_dirs=[BASE_TEMP_DIR, BASE_EXPORTS_DIR],
+        max_age_seconds=3600,
+        active_session_ids=[st.session_state["session_id"]],
+    )
 
 session_id = st.session_state["session_id"]
 TEMP_DIR, EXPORTS_DIR = init_session_workspace(BASE_TEMP_DIR, BASE_EXPORTS_DIR, session_id)
 
-# Refined Dark Glassmorphism Studio Theme CSS
+# Premium Liquid Glass Design System CSS
 st.markdown(
     """
     <style>
-    /* Google Fonts */
-    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+    /* Google Fonts: Instrument Serif + Inter + JetBrains Mono */
+    @import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
     :root {
-        --cf-bg: #07090E;
-        --cf-panel: rgba(15, 19, 32, 0.75);
-        --cf-panel-solid: #0F1320;
-        --cf-card: rgba(21, 27, 44, 0.65);
-        --cf-card-hover: rgba(28, 36, 58, 0.85);
-        --cf-border: rgba(255, 255, 255, 0.08);
-        --cf-border-subtle: rgba(255, 255, 255, 0.05);
-        --cf-border-glow: rgba(99, 102, 241, 0.35);
-        --cf-primary: #6366F1;
-        --cf-primary-hover: #4F46E5;
-        --cf-cyan: #06B6D4;
-        --cf-cyan-bright: #22D3EE;
-        --cf-emerald: #10B981;
-        --cf-amber: #F59E0B;
-        --cf-rose: #F43F5E;
-        --cf-text-1: #F8FAFC;
-        --cf-text-2: #94A3B8;
-        --cf-text-3: #64748B;
-        --cf-radius-sm: 6px;
-        --cf-radius-md: 10px;
-        --cf-radius-lg: 14px;
-        --cf-font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        --cf-font-mono: 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace;
+        --cf-pure-black: #000000;
+        --cf-deep-black: #050505;
+        --cf-elevated-black: #080808;
+        --cf-glass-bg: rgba(255, 255, 255, 0.01);
+        --cf-glass-border: rgba(255, 255, 255, 0.05);
+        --cf-glass-border-hover: rgba(255, 255, 255, 0.12);
+        --cf-glass-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.05);
+        --cf-text-primary: #FFFFFF;
+        --cf-text-secondary: rgba(255, 255, 255, 0.60);
+        --cf-text-muted: rgba(255, 255, 255, 0.40);
+        --cf-ease: cubic-bezier(0.34, 1.56, 0.64, 1);
+        --cf-font-serif: 'Instrument Serif', Georgia, serif;
+        --cf-font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        --cf-font-mono: 'JetBrains Mono', monospace;
+
+        /* Monochromatic compatibility aliases */
+        --cf-text-1: var(--cf-text-primary);
+        --cf-text-2: var(--cf-text-secondary);
+        --cf-text-3: var(--cf-text-muted);
+        --cf-border: var(--cf-glass-border);
+        --cf-border-subtle: rgba(255, 255, 255, 0.03);
+        --cf-cyan: rgba(255, 255, 255, 0.85);
+        --cf-cyan-bright: #FFFFFF;
+        --cf-primary: #FFFFFF;
+        --cf-card: var(--cf-elevated-black);
+        --cf-card-hover: rgba(255, 255, 255, 0.03);
+        --cf-panel: var(--cf-glass-bg);
     }
 
     /* Core Application Background */
     .stApp {
-        background: radial-gradient(ellipse 90% 60% at 50% -15%, rgba(99, 102, 241, 0.10) 0%, rgba(7, 9, 14, 0.98) 75%), #07090E;
-        color: var(--cf-text-1);
-        font-family: var(--cf-font-sans);
+        background-color: var(--cf-pure-black) !important;
+        color: var(--cf-text-primary) !important;
+        font-family: var(--cf-font-sans) !important;
         -webkit-font-smoothing: antialiased;
+        letter-spacing: -0.01em;
     }
 
-    /* Studio Header Topbar */
-    .studio-topbar {
-        background: rgba(15, 19, 32, 0.8);
-        backdrop-filter: blur(16px);
-        -webkit-backdrop-filter: blur(16px);
-        border: 1px solid var(--cf-border);
-        border-radius: var(--cf-radius-lg);
-        padding: 20px 24px;
-        margin-bottom: 24px;
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-        box-shadow: 0 8px 32px -4px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    /* Subtle Monochromatic Grain / Vignette Overlay */
+    .stApp::before {
+        content: "";
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: radial-gradient(circle 800px at 50% -200px, rgba(255, 255, 255, 0.025), transparent 80%),
+                    radial-gradient(circle 600px at 80% 60%, rgba(255, 255, 255, 0.015), transparent 70%);
+        pointer-events: none;
+        z-index: 0;
     }
-    .studio-brand-row {
+
+    /* Browser Fallback for Browsers Without backdrop-filter */
+    @supports not (backdrop-filter: blur(8px)) {
+        .liquid-nav, .liquid-card, .studio-card, .editorial-graphic-panel, .hero-glass-btn, div[data-testid="stFileUploader"] {
+            background-color: var(--cf-elevated-black) !important;
+        }
+    }
+
+    /* Responsive Top Navigation */
+    .liquid-nav {
+        position: sticky;
+        top: 0;
+        z-index: 999;
+        background: rgba(5, 5, 5, 0.85);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border-bottom: 1px solid var(--cf-glass-border);
+        padding: 16px 32px;
         display: flex;
         align-items: center;
         justify-content: space-between;
-        flex-wrap: wrap;
-        gap: 12px;
+        margin: -6rem -4rem 2rem -4rem;
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.6);
     }
-    .studio-logo-group {
+    @media (max-width: 768px) {
+        .liquid-nav {
+            margin: -4rem -1rem 1.5rem -1rem;
+            padding: 12px 16px;
+        }
+    }
+    .liquid-brand {
         display: flex;
         align-items: center;
         gap: 12px;
+        text-decoration: none !important;
+        color: var(--cf-text-primary);
     }
-    .studio-logo-icon {
-        width: 36px;
-        height: 36px;
-        background: linear-gradient(135deg, #6366F1 0%, #06B6D4 100%);
-        border-radius: 8px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 1.25rem;
-        box-shadow: 0 0 16px rgba(99, 102, 241, 0.4);
-    }
-    .studio-title {
-        color: var(--cf-text-1);
-        font-size: 1.65rem;
-        font-weight: 800;
+    .liquid-brand-title {
+        font-family: var(--cf-font-serif);
+        font-size: 1.75rem;
+        font-weight: 400;
         letter-spacing: -0.02em;
-        margin: 0;
+        color: var(--cf-text-primary);
+    }
+    .liquid-badge {
+        font-family: var(--cf-font-mono);
+        font-size: 0.70rem;
+        color: var(--cf-text-secondary);
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid var(--cf-glass-border);
+        padding: 2px 8px;
+        border-radius: 9999px;
+        letter-spacing: 0.05em;
+    }
+    .liquid-nav-links {
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 28px;
     }
-    .studio-badge {
-        background: rgba(99, 102, 241, 0.15);
-        color: #A5B4FC;
-        border: 1px solid rgba(99, 102, 241, 0.3);
-        font-size: 0.75rem;
+    @media (max-width: 680px) {
+        .liquid-nav-links { display: none; }
+    }
+    .liquid-nav-link {
+        color: var(--cf-text-secondary) !important;
+        text-decoration: none !important;
+        font-size: 0.88rem;
+        font-weight: 400;
+        position: relative;
+        padding: 4px 0;
+        transition: color 0.25s var(--cf-ease), transform 0.25s var(--cf-ease);
+    }
+    .liquid-nav-link:hover {
+        color: var(--cf-text-primary) !important;
+        transform: scale(1.04);
+    }
+    .liquid-nav-link::after {
+        content: '';
+        position: absolute;
+        width: 0;
+        height: 1px;
+        bottom: 0;
+        left: 50%;
+        background-color: var(--cf-text-primary);
+        transition: all 0.3s var(--cf-ease);
+        transform: translateX(-50%);
+    }
+    .liquid-nav-link:hover::after {
+        width: 100%;
+    }
+    .liquid-nav-cta {
+        background: var(--cf-text-primary) !important;
+        color: var(--cf-pure-black) !important;
+        font-size: 0.82rem;
         font-weight: 600;
-        padding: 3px 8px;
+        padding: 8px 18px;
         border-radius: 9999px;
-        font-family: var(--cf-font-mono);
-        letter-spacing: 0.04em;
+        text-decoration: none !important;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        transition: all 0.25s var(--cf-ease);
     }
-    .studio-telemetry-row {
+    .liquid-nav-cta:hover {
+        background: rgba(255, 255, 255, 0.9) !important;
+        transform: translateY(-1px);
+        box-shadow: 0 4px 20px rgba(255, 255, 255, 0.2);
+    }
+
+    /* HERO SECTION */
+    .liquid-hero {
+        padding: 42px 0 32px 0;
+        text-align: left;
+        max-width: 960px;
+        margin: 0 auto 36px auto;
+    }
+    .hero-headline {
+        font-family: var(--cf-font-serif);
+        font-size: clamp(2.8rem, 7vw, 5.4rem);
+        line-height: 1.05;
+        font-weight: 400;
+        color: var(--cf-text-primary);
+        margin: 0 0 20px 0;
+        letter-spacing: -0.03em;
+    }
+    .hero-headline-indent {
+        display: block;
+        padding-left: clamp(1.5rem, 5vw, 4rem);
+        font-style: italic;
+        color: rgba(255, 255, 255, 0.85);
+    }
+    .hero-tagline-wrapper {
+        min-height: 32px;
+        margin-bottom: 18px;
+        display: flex;
+        align-items: center;
+    }
+    .hero-tagline-rotating {
+        font-family: var(--cf-font-serif);
+        font-size: clamp(1.1rem, 2.4vw, 1.45rem);
+        font-style: italic;
+        color: var(--cf-text-secondary);
+        display: inline-block;
+    }
+    .hero-tagline-rotating::after {
+        content: "AI-guided highlight discovery for long podcasts.";
+        animation: taglineShuffle 14s infinite;
+        transition: opacity 0.7s var(--cf-ease);
+    }
+    @keyframes taglineShuffle {
+        0%, 20% { content: "AI-guided highlight discovery for long podcasts."; opacity: 1; }
+        22.5% { opacity: 0; }
+        25%, 45% { content: "Precision local clipping without middleman cloud fees."; opacity: 1; }
+        47.5% { opacity: 0; }
+        50%, 70% { content: "Automatic synchronized subtitles powered by Whisper."; opacity: 1; }
+        72.5% { opacity: 0; }
+        75%, 95% { content: "Studio-grade 9:16 and 1:1 social video reframing."; opacity: 1; }
+        97.5% { opacity: 0; }
+        100% { opacity: 1; content: "AI-guided highlight discovery for long podcasts."; }
+    }
+    .hero-subcopy {
+        font-size: clamp(0.95rem, 1.8vw, 1.15rem);
+        color: var(--cf-text-secondary);
+        line-height: 1.6;
+        max-width: 640px;
+        margin-bottom: 28px;
+        font-weight: 300;
+    }
+    .hero-actions {
         display: flex;
         align-items: center;
         gap: 16px;
         flex-wrap: wrap;
     }
-    .telemetry-chip {
+    .hero-glass-btn {
+        background: var(--cf-glass-bg);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        border: 1px solid var(--cf-glass-border);
+        box-shadow: var(--cf-glass-shadow);
+        border-radius: 9999px;
+        padding: 12px 28px;
+        color: var(--cf-text-primary) !important;
+        font-size: 0.92rem;
+        font-weight: 500;
+        text-decoration: none !important;
         display: inline-flex;
         align-items: center;
-        gap: 6px;
-        font-size: 0.78rem;
-        font-family: var(--cf-font-mono);
-        color: var(--cf-text-2);
-        background: rgba(255, 255, 255, 0.03);
-        padding: 4px 10px;
-        border-radius: var(--cf-radius-sm);
-        border: 1px solid var(--cf-border-subtle);
+        gap: 10px;
+        transition: all 0.3s var(--cf-ease);
     }
-    .telemetry-dot-ok {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        background-color: var(--cf-emerald);
-        box-shadow: 0 0 8px var(--cf-emerald);
+    .hero-glass-btn:hover {
+        background: rgba(255, 255, 255, 0.05);
+        border-color: var(--cf-glass-border-hover);
+        transform: translateY(-2px);
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.6), inset 0 1px 1px rgba(255, 255, 255, 0.1);
     }
-    .telemetry-dot-violet {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        background-color: #818CF8;
-        box-shadow: 0 0 8px #818CF8;
+
+    /* FEATURE CARDS GRID */
+    .features-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 18px;
+        margin-bottom: 48px;
     }
-    .telemetry-dot-cyan {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        background-color: var(--cf-cyan);
-        box-shadow: 0 0 8px var(--cf-cyan);
+    .liquid-card {
+        background: var(--cf-glass-bg);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        border: 1px solid var(--cf-glass-border);
+        box-shadow: var(--cf-glass-shadow);
+        border-radius: 24px;
+        padding: 24px 22px;
+        transition: all 0.35s var(--cf-ease);
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
     }
-    .studio-tagline {
-        color: var(--cf-text-2);
-        font-size: 0.92rem;
-        margin: 0;
+    .liquid-card:hover {
+        background: rgba(255, 255, 255, 0.025);
+        border-color: var(--cf-glass-border-hover);
+        transform: translateY(-3px) scale(1.01);
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.8), inset 0 1px 2px rgba(255, 255, 255, 0.08);
+    }
+    .liquid-card-icon {
+        width: 32px;
+        height: 32px;
+        opacity: 0.40;
+        margin-bottom: 16px;
+        transition: opacity 0.3s var(--cf-ease), transform 0.3s var(--cf-ease);
+        color: var(--cf-text-primary);
+    }
+    .liquid-card:hover .liquid-card-icon {
+        opacity: 1.0;
+        transform: scale(1.08);
+    }
+    .liquid-card-title {
+        font-family: var(--cf-font-serif);
+        font-size: 1.35rem;
+        font-weight: 400;
+        color: var(--cf-text-primary);
+        margin: 0 0 8px 0;
+    }
+    .liquid-card-desc {
+        font-size: 0.84rem;
+        color: var(--cf-text-secondary);
         line-height: 1.5;
+        margin: 0;
     }
 
-    /* Section Panels */
-    .studio-card {
-        background: var(--cf-panel);
-        backdrop-filter: blur(14px);
-        -webkit-backdrop-filter: blur(14px);
-        border: 1px solid var(--cf-border);
-        border-radius: var(--cf-radius-md);
-        padding: 20px 22px;
-        margin-bottom: 20px;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
-        transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    /* FEATURE EXPLANATION SECTION (Two Column Editorial) */
+    .editorial-section {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 36px;
+        align-items: center;
+        margin-bottom: 56px;
+        padding: 16px 0;
     }
-    .studio-card:hover {
-        border-color: rgba(255, 255, 255, 0.12);
+    @media (max-width: 860px) {
+        .editorial-section {
+            grid-template-columns: 1fr;
+            gap: 24px;
+        }
     }
-
-    /* Section Step Header */
-    .studio-section-header {
+    .editorial-left {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+    }
+    .editorial-heading {
+        font-family: var(--cf-font-serif);
+        font-size: clamp(2rem, 3.8vw, 2.9rem);
+        line-height: 1.15;
+        font-weight: 400;
+        color: var(--cf-text-primary);
+        margin: 0;
+    }
+    .editorial-desc {
+        font-size: 0.95rem;
+        color: var(--cf-text-secondary);
+        line-height: 1.6;
+    }
+    .editorial-list {
+        list-style: none;
+        padding: 0;
+        margin: 8px 0 0 0;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+    }
+    .editorial-item {
         display: flex;
         align-items: center;
         gap: 12px;
-        margin-bottom: 14px;
+        font-size: 0.88rem;
+        color: var(--cf-text-primary);
     }
-    .studio-step-num {
-        background: rgba(6, 182, 212, 0.12);
-        color: var(--cf-cyan-bright);
-        border: 1px solid rgba(6, 182, 212, 0.25);
+    .editorial-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.4);
+    }
+    .editorial-muted {
+        font-size: 0.76rem;
+        color: var(--cf-text-muted);
         font-family: var(--cf-font-mono);
-        font-size: 0.75rem;
-        font-weight: 700;
-        padding: 2px 8px;
-        border-radius: var(--cf-radius-sm);
+        margin-top: 8px;
         letter-spacing: 0.05em;
     }
-    .studio-section-title {
-        color: var(--cf-text-1);
-        font-size: 1.25rem;
-        font-weight: 700;
-        letter-spacing: -0.01em;
-        margin: 0;
+
+    /* Decorative Waveform & Timeline Graphic */
+    .editorial-graphic-panel {
+        background: var(--cf-glass-bg);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        border: 1px solid var(--cf-glass-border);
+        box-shadow: var(--cf-glass-shadow);
+        border-radius: 24px;
+        padding: 28px;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        position: relative;
+        overflow: hidden;
+    }
+    .timeline-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-family: var(--cf-font-mono);
+        font-size: 0.72rem;
+        color: var(--cf-text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+    }
+    .timeline-track {
+        height: 68px;
+        background: rgba(255, 255, 255, 0.02);
+        border: 1px solid rgba(255, 255, 255, 0.04);
+        border-radius: 12px;
+        display: flex;
+        align-items: center;
+        padding: 0 16px;
+        gap: 5px;
+        position: relative;
+        overflow: hidden;
+    }
+    .waveform-bar {
+        flex: 1;
+        background: rgba(255, 255, 255, 0.15);
+        border-radius: 2px;
+        transition: all 0.3s var(--cf-ease);
+    }
+    .waveform-bar:hover {
+        background: #FFFFFF;
+        transform: scaleY(1.3);
+    }
+    .timeline-marker-region {
+        position: absolute;
+        left: 28%;
+        width: 44%;
+        top: 0; bottom: 0;
+        background: rgba(255, 255, 255, 0.05);
+        border-left: 2px solid #FFFFFF;
+        border-right: 2px solid #FFFFFF;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: var(--cf-font-mono);
+        font-size: 0.70rem;
+        color: var(--cf-text-primary);
+        letter-spacing: 0.04em;
+    }
+    .timeline-meta-row {
+        display: flex;
+        justify-content: space-between;
+        font-family: var(--cf-font-mono);
+        font-size: 0.72rem;
+        color: var(--cf-text-secondary);
     }
 
-    /* Media Inspector Metrics Grid */
+    /* SECTION TITLES & HEADERS */
+    .studio-section-header {
+        display: flex;
+        align-items: baseline;
+        gap: 14px;
+        margin: 32px 0 16px 0;
+    }
+    .studio-step-num {
+        font-family: var(--cf-font-mono);
+        font-size: 0.72rem;
+        color: var(--cf-text-muted);
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid var(--cf-glass-border);
+        padding: 2px 8px;
+        border-radius: 6px;
+        letter-spacing: 0.06em;
+    }
+    .studio-section-title {
+        font-family: var(--cf-font-serif);
+        font-size: 1.85rem;
+        font-weight: 400;
+        color: var(--cf-text-primary);
+        margin: 0;
+        letter-spacing: -0.01em;
+    }
+
+    /* WORKSPACE GLASS PANELS */
+    .studio-card {
+        background: var(--cf-glass-bg);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        border: 1px solid var(--cf-glass-border);
+        box-shadow: var(--cf-glass-shadow);
+        border-radius: 24px;
+        padding: 24px;
+        margin-bottom: 24px;
+        transition: border-color 0.25s var(--cf-ease);
+    }
+    .studio-card:hover {
+        border-color: var(--cf-glass-border-hover);
+    }
+
+    /* MEDIA INSPECTOR METRICS GRID */
     .inspector-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
         gap: 12px;
-        margin: 16px 0;
+        margin: 18px 0;
     }
     .inspector-card {
-        background: var(--cf-card);
-        border: 1px solid var(--cf-border-subtle);
-        border-radius: var(--cf-radius-sm);
-        padding: 12px 14px;
+        background: var(--cf-elevated-black);
+        border: 1px solid var(--cf-glass-border);
+        border-radius: 16px;
+        padding: 14px 16px;
         display: flex;
         flex-direction: column;
         gap: 4px;
     }
     .inspector-label {
-        color: var(--cf-text-3);
-        font-size: 0.72rem;
-        font-weight: 600;
+        color: var(--cf-text-muted);
+        font-size: 0.68rem;
+        font-family: var(--cf-font-mono);
         text-transform: uppercase;
         letter-spacing: 0.08em;
     }
     .inspector-val {
-        color: var(--cf-text-1);
+        color: var(--cf-text-primary);
         font-family: var(--cf-font-mono);
-        font-size: 1.15rem;
-        font-weight: 600;
-        white-space: nowrap;
+        font-size: 1.10rem;
+        font-weight: 500;
         overflow: hidden;
         text-overflow: ellipsis;
+        white-space: nowrap;
     }
     .inspector-val-cyan {
-        color: var(--cf-cyan-bright);
+        color: var(--cf-text-primary);
     }
 
-    /* Highlight Candidate Proposal Cards */
+    /* PROPOSAL CARDS */
     .proposal-card {
-        background: var(--cf-card);
-        border: 1px solid var(--cf-border);
-        border-radius: var(--cf-radius-sm);
-        padding: 16px;
-        margin-bottom: 12px;
-        transition: transform 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+        background: var(--cf-elevated-black);
+        border: 1px solid var(--cf-glass-border);
+        border-radius: 20px;
+        padding: 18px 20px;
+        margin-bottom: 14px;
+        transition: all 0.25s var(--cf-ease);
     }
     .proposal-card:hover {
-        background: var(--cf-card-hover);
-        border-color: rgba(99, 102, 241, 0.4);
+        background: rgba(255, 255, 255, 0.02);
+        border-color: var(--cf-glass-border-hover);
+        transform: translateY(-1px);
     }
     .proposal-header {
         display: flex;
@@ -320,197 +622,172 @@ st.markdown(
         margin-bottom: 8px;
     }
     .proposal-title {
-        color: #E0E7FF;
-        font-size: 1.05rem;
-        font-weight: 700;
-        display: flex;
-        align-items: center;
-        gap: 8px;
+        color: var(--cf-text-primary);
+        font-family: var(--cf-font-serif);
+        font-size: 1.25rem;
+        font-weight: 400;
     }
     .proposal-time-chip {
-        background: rgba(6, 182, 212, 0.1);
-        color: var(--cf-cyan-bright);
-        border: 1px solid rgba(6, 182, 212, 0.25);
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--cf-text-secondary);
+        border: 1px solid var(--cf-glass-border);
         font-family: var(--cf-font-mono);
-        font-size: 0.75rem;
-        font-weight: 600;
-        padding: 2px 7px;
-        border-radius: 4px;
+        font-size: 0.72rem;
+        padding: 2px 8px;
+        border-radius: 6px;
     }
     .proposal-hook {
-        color: #F8FAFC;
+        color: var(--cf-text-primary);
         font-style: italic;
-        font-size: 0.92rem;
-        background: rgba(99, 102, 241, 0.08);
-        border-left: 3px solid var(--cf-primary);
-        padding: 6px 12px;
-        border-radius: 0 4px 4px 0;
-        margin: 8px 0;
+        font-family: var(--cf-font-serif);
+        font-size: 1.05rem;
+        background: rgba(255, 255, 255, 0.02);
+        border-left: 2px solid rgba(255, 255, 255, 0.4);
+        padding: 8px 14px;
+        border-radius: 0 10px 10px 0;
+        margin: 10px 0;
         line-height: 1.4;
     }
     .proposal-explanation {
-        color: var(--cf-text-2);
+        color: var(--cf-text-secondary);
         font-size: 0.86rem;
-        line-height: 1.45;
+        line-height: 1.5;
     }
 
     /* Notice and Security Pills */
     .studio-notice {
-        background: rgba(99, 102, 241, 0.08);
-        border: 1px solid rgba(99, 102, 241, 0.2);
-        border-radius: var(--cf-radius-sm);
-        padding: 10px 14px;
+        background: rgba(255, 255, 255, 0.02);
+        border: 1px solid var(--cf-glass-border);
+        border-radius: 12px;
+        padding: 12px 16px;
         font-size: 0.82rem;
-        color: #C7D2FE;
+        color: var(--cf-text-secondary);
         display: flex;
         align-items: center;
         gap: 10px;
-        margin: 12px 0;
+        margin: 14px 0;
         line-height: 1.4;
     }
 
-    /* Empty state hero */
-    .empty-hero {
-        background: var(--cf-panel);
-        border: 1px dashed rgba(255, 255, 255, 0.12);
-        border-radius: var(--cf-radius-lg);
-        padding: 48px 24px;
-        text-align: center;
-        margin: 20px 0;
-    }
-    .empty-hero-icon {
-        font-size: 3rem;
-        margin-bottom: 12px;
-    }
-    .empty-hero-title {
-        color: var(--cf-text-1);
-        font-size: 1.4rem;
-        font-weight: 700;
-        margin-bottom: 6px;
-    }
-    .empty-hero-sub {
-        color: var(--cf-text-2);
-        font-size: 0.95rem;
-        max-width: 520px;
-        margin: 0 auto 20px auto;
-        line-height: 1.5;
-    }
-
-    /* Roadmap grid */
-    .roadmap-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-        gap: 14px;
-        margin-top: 14px;
-    }
-    .roadmap-card {
-        background: var(--cf-card);
-        border: 1px solid var(--cf-border-subtle);
-        border-radius: var(--cf-radius-sm);
-        padding: 16px;
-    }
-    .roadmap-title {
-        color: #E2E8F0;
-        font-size: 0.95rem;
-        font-weight: 700;
-        margin-bottom: 6px;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-    .roadmap-desc {
-        color: var(--cf-text-2);
-        font-size: 0.84rem;
-        line-height: 1.4;
-    }
-
-    /* Streamlit Widget Polish Overrides */
+    /* STREAMLIT CONTROLS OVERRIDES */
+    /* Sidebar */
     div[data-testid="stSidebar"] {
-        background-color: #0A0D15 !important;
-        border-right: 1px solid var(--cf-border) !important;
+        background-color: var(--cf-deep-black) !important;
+        border-right: 1px solid var(--cf-glass-border) !important;
     }
     div[data-testid="stSidebar"] .block-container {
-        padding-top: 2rem !important;
+        padding-top: 1.5rem !important;
     }
 
-    /* Primary and Secondary Buttons */
+    /* Primary Action Buttons */
     div.stButton > button[kind="primary"] {
-        background: linear-gradient(180deg, #6366F1 0%, #4F46E5 100%) !important;
-        border: 1px solid rgba(255, 255, 255, 0.15) !important;
-        color: #FFFFFF !important;
+        background: #FFFFFF !important;
+        border: 1px solid rgba(255, 255, 255, 0.3) !important;
+        color: #000000 !important;
+        font-family: var(--cf-font-sans) !important;
         font-weight: 600 !important;
-        font-size: 0.92rem !important;
-        border-radius: var(--cf-radius-sm) !important;
-        padding: 0.55rem 1.25rem !important;
-        box-shadow: 0 4px 14px rgba(79, 70, 229, 0.35) !important;
-        transition: all 0.15s ease !important;
+        font-size: 0.90rem !important;
+        border-radius: 9999px !important;
+        padding: 0.60rem 1.6rem !important;
+        box-shadow: 0 4px 16px rgba(255, 255, 255, 0.15) !important;
+        transition: all 0.25s var(--cf-ease) !important;
     }
     div.stButton > button[kind="primary"]:hover {
-        background: linear-gradient(180deg, #7175f5 0%, #5850ee 100%) !important;
-        box-shadow: 0 6px 20px rgba(99, 102, 241, 0.5) !important;
-        transform: translateY(-1px) !important;
+        background: rgba(255, 255, 255, 0.92) !important;
+        transform: translateY(-2px) scale(1.01) !important;
+        box-shadow: 0 6px 24px rgba(255, 255, 255, 0.3) !important;
     }
+
+    /* Secondary Action Buttons */
     div.stButton > button[kind="secondary"] {
-        background: rgba(255, 255, 255, 0.04) !important;
-        border: 1px solid var(--cf-border) !important;
-        color: var(--cf-text-1) !important;
+        background: rgba(255, 255, 255, 0.03) !important;
+        border: 1px solid var(--cf-glass-border) !important;
+        color: var(--cf-text-primary) !important;
+        font-family: var(--cf-font-sans) !important;
         font-weight: 500 !important;
-        border-radius: var(--cf-radius-sm) !important;
-        transition: all 0.15s ease !important;
+        font-size: 0.88rem !important;
+        border-radius: 9999px !important;
+        padding: 0.55rem 1.25rem !important;
+        transition: all 0.25s var(--cf-ease) !important;
     }
     div.stButton > button[kind="secondary"]:hover {
         background: rgba(255, 255, 255, 0.08) !important;
-        border-color: rgba(255, 255, 255, 0.2) !important;
+        border-color: var(--cf-glass-border-hover) !important;
+        transform: translateY(-1px) !important;
     }
 
     /* Download Buttons */
     div.stDownloadButton > button {
-        background: rgba(15, 23, 42, 0.8) !important;
-        border: 1px solid rgba(99, 102, 241, 0.3) !important;
-        color: #E2E8F0 !important;
+        background: rgba(255, 255, 255, 0.04) !important;
+        border: 1px solid var(--cf-glass-border) !important;
+        color: var(--cf-text-primary) !important;
+        font-family: var(--cf-font-sans) !important;
         font-size: 0.82rem !important;
-        font-weight: 600 !important;
-        border-radius: var(--cf-radius-sm) !important;
-        padding: 0.45rem 0.85rem !important;
-        transition: all 0.15s ease !important;
+        font-weight: 500 !important;
+        border-radius: 9999px !important;
+        padding: 0.50rem 1.0rem !important;
+        transition: all 0.25s var(--cf-ease) !important;
     }
     div.stDownloadButton > button:hover {
-        background: rgba(99, 102, 241, 0.2) !important;
-        border-color: var(--cf-primary) !important;
-        color: #FFFFFF !important;
-        box-shadow: 0 0 12px rgba(99, 102, 241, 0.25) !important;
+        background: #FFFFFF !important;
+        color: #000000 !important;
+        border-color: #FFFFFF !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 4px 16px rgba(255, 255, 255, 0.2) !important;
     }
 
-    /* Form Inputs */
-    div[data-baseweb="input"], div[data-baseweb="select"] > div {
-        background-color: rgba(13, 17, 26, 0.8) !important;
-        border-color: var(--cf-border) !important;
-        border-radius: var(--cf-radius-sm) !important;
-        color: var(--cf-text-1) !important;
+    /* Form Inputs, Selectboxes, Textareas */
+    div[data-baseweb="input"], div[data-baseweb="select"] > div, div[data-baseweb="textarea"] {
+        background-color: var(--cf-elevated-black) !important;
+        border-color: var(--cf-glass-border) !important;
+        border-radius: 12px !important;
+        color: var(--cf-text-primary) !important;
+        font-family: var(--cf-font-sans) !important;
     }
-    div[data-baseweb="input"]:focus-within, div[data-baseweb="select"] > div:focus-within {
-        border-color: var(--cf-primary) !important;
-        box-shadow: 0 0 0 1px var(--cf-primary) !important;
+    div[data-baseweb="input"]:focus-within, div[data-baseweb="select"] > div:focus-within, div[data-baseweb="textarea"]:focus-within {
+        border-color: rgba(255, 255, 255, 0.35) !important;
+        box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.2) !important;
     }
 
     /* Status and Alert Containers */
     div[data-testid="stStatusWidget"] {
-        background-color: var(--cf-panel) !important;
-        border: 1px solid var(--cf-border) !important;
-        border-radius: var(--cf-radius-sm) !important;
+        background-color: var(--cf-elevated-black) !important;
+        border: 1px solid var(--cf-glass-border) !important;
+        border-radius: 16px !important;
     }
 
     /* Sliders */
     div[data-testid="stSlider"] [role="slider"] {
-        background-color: var(--cf-primary) !important;
-        border: 2px solid #FFFFFF !important;
+        background-color: #FFFFFF !important;
+        border: 2px solid var(--cf-pure-black) !important;
+    }
+
+    /* File Uploader Container */
+    div[data-testid="stFileUploader"] {
+        background: var(--cf-glass-bg);
+        border: 1px dashed var(--cf-glass-border);
+        border-radius: 24px;
+        padding: 16px;
+        transition: border-color 0.25s var(--cf-ease);
+    }
+    div[data-testid="stFileUploader"]:hover {
+        border-color: var(--cf-glass-border-hover);
     }
 
     /* Video Player Styling */
     div[data-testid="stVideo"] video {
-        border-radius: var(--cf-radius-sm) !important;
-        border: 1px solid var(--cf-border) !important;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5) !important;
+        border-radius: 18px !important;
+        border: 1px solid var(--cf-glass-border) !important;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.8) !important;
+    }
+
+    /* Reduced Motion */
+    @media (prefers-reduced-motion: reduce) {
+        *, ::before, ::after {
+            animation-duration: 0.01ms !important;
+            animation-iteration-count: 1 !important;
+            transition-duration: 0.01ms !important;
+        }
     }
     </style>
     """,
@@ -537,19 +814,19 @@ with st.sidebar:
 
     st.markdown(
         f"""
-        <div class="studio-card" style="padding: 14px; margin-bottom: 14px;">
-            <div style="font-size:0.72rem; color:var(--cf-text-3); text-transform:uppercase; letter-spacing:0.08em; font-weight:700; margin-bottom:6px;">RUNTIME ENGINES</div>
-            <div style="font-size:0.82rem; margin-bottom:6px;">
-                <span class="telemetry-dot-ok" style="display:inline-block; vertical-align:middle; margin-right:4px;"></span>
-                <b>FFmpeg Engine</b>: <span style="font-family:var(--cf-font-mono); color:#38BDF8;">{'Active (Local)' if ffprobe_ok else 'Missing'}</span>
+        <div class="studio-card" style="padding: 16px; margin-bottom: 16px; border-radius: 18px;">
+            <div style="font-size:0.68rem; color:var(--cf-text-muted); text-transform:uppercase; letter-spacing:0.08em; font-family:var(--cf-font-mono); margin-bottom:8px;">RUNTIME ENGINES</div>
+            <div style="font-size:0.82rem; margin-bottom:6px; color:var(--cf-text-primary);">
+                <span style="display:inline-block; width:6px; height:6px; border-radius:50%; background:#FFFFFF; margin-right:6px; box-shadow:0 0 6px #FFFFFF;"></span>
+                <b>FFmpeg</b>: <span style="font-family:var(--cf-font-mono); color:var(--cf-text-secondary);">{'Active (Local)' if ffprobe_ok else 'Missing'}</span>
             </div>
-            <div style="font-size:0.82rem; margin-bottom:6px;">
-                <span class="telemetry-dot-violet" style="display:inline-block; vertical-align:middle; margin-right:4px;"></span>
-                <b>Highlight AI</b>: <span style="font-family:var(--cf-font-mono); color:#A5B4FC;">Gemini BYOK</span>
+            <div style="font-size:0.82rem; margin-bottom:6px; color:var(--cf-text-primary);">
+                <span style="display:inline-block; width:6px; height:6px; border-radius:50%; background:rgba(255,255,255,0.6); margin-right:6px;"></span>
+                <b>Highlight AI</b>: <span style="font-family:var(--cf-font-mono); color:var(--cf-text-secondary);">Gemini BYOK</span>
             </div>
-            <div style="font-size:0.82rem;">
-                <span class="telemetry-dot-cyan" style="display:inline-block; vertical-align:middle; margin-right:4px;"></span>
-                <b>Speech ASR</b>: <span style="font-family:var(--cf-font-mono); color:#67E8F9;">{speech_device_str}</span>
+            <div style="font-size:0.82rem; color:var(--cf-text-primary);">
+                <span style="display:inline-block; width:6px; height:6px; border-radius:50%; background:rgba(255,255,255,0.6); margin-right:6px;"></span>
+                <b>Speech ASR</b>: <span style="font-family:var(--cf-font-mono); color:var(--cf-text-secondary);">{speech_device_str}</span>
             </div>
         </div>
         """,
@@ -559,8 +836,8 @@ with st.sidebar:
     st.markdown("#### 💾 Storage & Isolation")
     st.markdown(
         f"""
-        <div style="font-size:0.75rem; color:var(--cf-text-3); font-family:var(--cf-font-mono); margin-bottom:8px;">
-            SESSION: <span style="color:var(--cf-cyan);">{session_id}</span> (ISOLATED)
+        <div style="font-size:0.75rem; color:var(--cf-text-muted); font-family:var(--cf-font-mono); margin-bottom:8px;">
+            SESSION: <span style="color:var(--cf-text-primary);">{session_id}</span> (ISOLATED)
         </div>
         """,
         unsafe_allow_html=True,
@@ -599,36 +876,178 @@ with st.sidebar:
     st.markdown("#### 🧭 Studio Navigation")
     st.caption("1. Ingest Media & Inspector\n2. AI Highlight Detection\n3. Format & Subtitle Studio\n4. Export Library\n5. Manual Precision Trimmer")
 
-# Topbar Application Shell
+# Liquid Glass Top Navigation
 st.markdown(
     """
-    <div class="studio-topbar">
-        <div class="studio-brand-row">
-            <div class="studio-logo-group">
-                <div class="studio-logo-icon">🎬</div>
-                <div>
-                    <h1 class="studio-title">
-                        ClipForge <span style="font-weight:300; opacity:0.8;">Studio</span>
-                        <span class="studio-badge">v0.5.0-pro</span>
-                    </h1>
-                </div>
-            </div>
-            <div class="studio-telemetry-row">
-                <div class="telemetry-chip">
-                    <span class="telemetry-dot-ok"></span> NLE CORE: FFMPEG 9
-                </div>
-                <div class="telemetry-chip">
-                    <span class="telemetry-dot-violet"></span> BYOK: GEMINI 3.6 FLASH
-                </div>
-                <div class="telemetry-chip">
-                    <span class="telemetry-dot-cyan"></span> WHISPER ASR
-                </div>
+    <nav class="liquid-nav">
+        <a href="#" class="liquid-brand">
+            <span class="liquid-brand-title">ClipForge</span>
+            <span class="liquid-badge">v0.5.0-pro</span>
+        </a>
+        <div class="liquid-nav-links">
+            <a href="#capabilities" class="liquid-nav-link">Capabilities</a>
+            <a href="#architecture" class="liquid-nav-link">Architecture</a>
+            <a href="#workspace" class="liquid-nav-link">Studio Workspace</a>
+        </div>
+        <a href="#workspace" class="liquid-nav-cta">Launch Studio ↓</a>
+    </nav>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Hero Section
+st.markdown(
+    """
+    <section class="liquid-hero">
+        <h1 class="hero-headline">
+            Every moment.<br>
+            <span class="hero-headline-indent">Worth watching.</span>
+        </h1>
+        <div class="hero-tagline-wrapper">
+            <span class="hero-tagline-rotating"></span>
+        </div>
+        <p class="hero-subcopy">
+            Turn long videos into compelling short clips with AI-assisted highlight detection and local video processing.
+        </p>
+        <div class="hero-actions">
+            <a href="#workspace" class="hero-glass-btn">
+                Open Video Workspace
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg>
+            </a>
+        </div>
+    </section>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Feature Cards Grid
+st.markdown(
+    """
+    <div id="capabilities"></div>
+    <section class="features-grid">
+        <div class="liquid-card">
+            <div>
+                <svg class="liquid-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
+                    <path d="M5 3v4"/>
+                    <path d="M19 17v4"/>
+                    <path d="M3 5h4"/>
+                    <path d="M17 19h4"/>
+                </svg>
+                <h3 class="liquid-card-title">AI Highlight Detection</h3>
+                <p class="liquid-card-desc">Multimodal Gemini analysis pinpoints viral moments, dialogue hooks, and key topics from podcasts or streams.</p>
             </div>
         </div>
-        <p class="studio-tagline">
-            Professional AI highlight extraction and social reframing studio. Connect your own Gemini API key for zero-markup automatic clipping.
-        </p>
-    </div>
+        <div class="liquid-card">
+            <div>
+                <svg class="liquid-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="6" cy="6" r="3"/>
+                    <circle cx="6" cy="18" r="3"/>
+                    <line x1="20" y1="4" x2="8.12" y2="15.88"/>
+                    <line x1="14.47" y1="14.48" x2="20" y2="20"/>
+                    <line x1="8.12" y1="8.12" x2="12" y2="12"/>
+                </svg>
+                <h3 class="liquid-card-title">Precision Clipping</h3>
+                <p class="liquid-card-desc">Local FFmpeg engine extracts subclips with millisecond accuracy, preserving source quality without cloud transcoding.</p>
+            </div>
+        </div>
+        <div class="liquid-card">
+            <div>
+                <svg class="liquid-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                    <rect width="18" height="14" x="3" y="5" rx="2" ry="2"/>
+                    <path d="M7 15h4M15 15h2M7 11h2M13 11h4"/>
+                </svg>
+                <h3 class="liquid-card-title">Automatic Subtitles</h3>
+                <p class="liquid-card-desc">Hardware-accelerated Faster-Whisper ASR generates aligned SRT captions and optional burned-in hardsubs.</p>
+            </div>
+        </div>
+        <div class="liquid-card">
+            <div>
+                <svg class="liquid-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                    <rect width="14" height="20" x="5" y="2" rx="2" ry="2"/>
+                    <path d="M12 18h.01"/>
+                </svg>
+                <h3 class="liquid-card-title">Vertical & Square Exports</h3>
+                <p class="liquid-card-desc">Social reframing for 9:16 Shorts/TikTok and 1:1 Feed posts with Center Crop or stylized Blurred Background fill.</p>
+            </div>
+        </div>
+    </section>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Feature Explanation Section (Two-Column Editorial)
+st.markdown(
+    """
+    <div id="architecture"></div>
+    <section class="editorial-section">
+        <div class="editorial-left">
+            <h2 class="editorial-heading">Designed for creators. Built for precision.</h2>
+            <p class="editorial-desc">
+                ClipForge pairs Google Gemini's multimodal reasoning with local FFmpeg media processing. You connect your own Gemini API key—ensuring complete control over model selection, privacy, and quotas without platform markups.
+            </p>
+            <ul class="editorial-list">
+                <li class="editorial-item">
+                    <span class="editorial-dot"></span>
+                    <span><b>BYOK Architecture</b>: Direct Google API pricing, zero monthly middleman markups.</span>
+                </li>
+                <li class="editorial-item">
+                    <span class="editorial-dot"></span>
+                    <span><b>Local Media Pipeline</b>: Sub-clipping, subtitles, and reframing run 100% locally.</span>
+                </li>
+                <li class="editorial-item">
+                    <span class="editorial-dot"></span>
+                    <span><b>Immediate Cloud Purge</b>: Media sent to Google is deleted immediately after parsing.</span>
+                </li>
+                <li class="editorial-item">
+                    <span class="editorial-dot"></span>
+                    <span><b>Session Isolation</b>: Isolated per-user workspaces with automated TTL garbage collection.</span>
+                </li>
+            </ul>
+            <div class="editorial-muted">
+                PIPELINE: FFMPEG 9 · FASTER-WHISPER · GEMINI 3.6 FLASH · BYOK ENGINE
+            </div>
+        </div>
+        <div class="editorial-graphic-panel">
+            <div class="timeline-header">
+                <span>TIMELINE MONITOR</span>
+                <span>CH-1 / CH-2 STEREO</span>
+            </div>
+            <div class="timeline-track">
+                <div class="waveform-bar" style="height: 35%;"></div>
+                <div class="waveform-bar" style="height: 60%;"></div>
+                <div class="waveform-bar" style="height: 45%;"></div>
+                <div class="waveform-bar" style="height: 80%;"></div>
+                <div class="waveform-bar" style="height: 95%;"></div>
+                <div class="waveform-bar" style="height: 70%;"></div>
+                <div class="waveform-bar" style="height: 85%;"></div>
+                <div class="waveform-bar" style="height: 100%;"></div>
+                <div class="waveform-bar" style="height: 75%;"></div>
+                <div class="waveform-bar" style="height: 90%;"></div>
+                <div class="waveform-bar" style="height: 65%;"></div>
+                <div class="waveform-bar" style="height: 85%;"></div>
+                <div class="waveform-bar" style="height: 50%;"></div>
+                <div class="waveform-bar" style="height: 90%;"></div>
+                <div class="waveform-bar" style="height: 100%;"></div>
+                <div class="waveform-bar" style="height: 75%;"></div>
+                <div class="waveform-bar" style="height: 60%;"></div>
+                <div class="waveform-bar" style="height: 40%;"></div>
+                <div class="waveform-bar" style="height: 70%;"></div>
+                <div class="waveform-bar" style="height: 55%;"></div>
+                <div class="waveform-bar" style="height: 85%;"></div>
+                <div class="waveform-bar" style="height: 40%;"></div>
+                <div class="waveform-bar" style="height: 25%;"></div>
+                <div class="timeline-marker-region">
+                    <span>CLIP HIGHLIGHT [00:42 — 01:18]</span>
+                </div>
+            </div>
+            <div class="timeline-meta-row">
+                <span>IN: 00:00:42.000</span>
+                <span>DURATION: 36.00s</span>
+                <span>OUT: 00:01:18.000</span>
+            </div>
+        </div>
+    </section>
     """,
     unsafe_allow_html=True,
 )
@@ -641,6 +1060,9 @@ if not ffprobe_ok:
         "Install via `sudo pacman -S ffmpeg` or `sudo apt install ffmpeg`.",
         icon="🚨",
     )
+
+# Video Workspace Anchor
+st.markdown('<div id="workspace"></div>', unsafe_allow_html=True)
 
 # Section 1: Video Ingestion
 st.markdown(
@@ -663,39 +1085,32 @@ uploaded_file = st.file_uploader(
 if uploaded_file is None:
     st.markdown(
         """
-        <div class="empty-hero">
-            <div class="empty-hero-icon">🎞️</div>
-            <div class="empty-hero-title">No Media Loaded into Studio</div>
-            <div class="empty-hero-sub">
-                Drop an MP4, MOV, or MKV podcast or livestream file above to inspect audio/video tracks,
-                detect viral moments with Gemini, and reframe for TikTok, Shorts, and Reels.
+        <div class="studio-card" style="text-align: center; padding: 48px 24px;">
+            <div style="font-family: var(--cf-font-serif); font-size: 1.8rem; color: var(--cf-text-primary); margin-bottom: 8px;">
+                Ready for Media Ingestion
             </div>
-            <div class="roadmap-grid" style="text-align: left; max-width: 840px; margin: 0 auto;">
-                <div class="roadmap-card">
-                    <div class="roadmap-title">⚡ Gemini Multimodal BYOK</div>
-                    <div class="roadmap-desc">Direct native video analysis or lightweight audio extraction using your own Google Gemini API key.</div>
-                </div>
-                <div class="roadmap-card">
-                    <div class="roadmap-title">💬 Word-Accurate Subtitles</div>
-                    <div class="roadmap-desc">Local Faster-Whisper transcription generating SRT and burned hardsubs with zero API costs.</div>
-                </div>
-                <div class="roadmap-card">
-                    <div class="roadmap-title">📱 9:16 & 1:1 Social Framing</div>
-                    <div class="roadmap-desc">High-definition vertical export with blurred background filling or centered subject crop.</div>
-                </div>
-                <div class="roadmap-card">
-                    <div class="roadmap-title">🔒 100% Client-Side Privacy</div>
-                    <div class="roadmap-desc">Your keys stay in session memory. Local media never leaves your workstation without your consent.</div>
-                </div>
+            <div style="color: var(--cf-text-secondary); font-size: 0.95rem; max-width: 540px; margin: 0 auto 24px auto; line-height: 1.6;">
+                Drop an MP4, MOV, or MKV podcast or livestream file above to inspect audio/video tracks, discover viral moments with Gemini, and reframe for social platforms.
+            </div>
+            <div style="font-family: var(--cf-font-mono); font-size: 0.75rem; color: var(--cf-text-muted); letter-spacing: 0.06em;">
+                ACCEPTED CODECS: H.264 · HEVC · VP9 · AV1 · AAC · OPUS · MAX 1024 MB
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 else:
-    # Validate upload size
+    # Validate upload size bounds
     if uploaded_file.size <= 0:
         st.error("Uploaded video file is empty (0 bytes). Please upload a valid media file.", icon="⚠️")
+        st.stop()
+
+    max_upload_bytes = DEFAULT_MAX_UPLOAD_MB * 1024 * 1024
+    if uploaded_file.size > max_upload_bytes:
+        st.error(
+            f"File size ({uploaded_file.size / (1024 * 1024):.1f} MB) exceeds maximum upload limit of {DEFAULT_MAX_UPLOAD_MB} MB.",
+            icon="🚨",
+        )
         st.stop()
 
     # Validate file extension
@@ -703,6 +1118,22 @@ else:
     if file_suffix not in (".mp4", ".mov", ".mkv"):
         st.error(f"Unsupported file extension '{file_suffix}'. ClipForge supports MP4, MOV, and MKV files.", icon="🚨")
         st.stop()
+
+    # Pre-flight disk space safeguard: ensure sufficient disk space before writing
+    required_space = uploaded_file.size + DEFAULT_MIN_FREE_DISK_BYTES
+    is_disk_ok, free_bytes, _ = check_disk_space_available(BASE_TEMP_DIR, min_free_bytes=required_space)
+    if not is_disk_ok:
+        # Run aggressive cleanup on older sessions to reclaim disk space
+        cleanup_stale_files([BASE_TEMP_DIR, BASE_EXPORTS_DIR], max_age_seconds=1800, active_session_ids=[session_id])
+        is_disk_ok, free_bytes, _ = check_disk_space_available(BASE_TEMP_DIR, min_free_bytes=required_space)
+        if not is_disk_ok:
+            st.error(
+                f"Server storage threshold reached ({free_bytes / (1024*1024*1024):.1f} GB available, "
+                f"need at least {required_space / (1024*1024*1024):.1f} GB). "
+                "Please wait for background cleanup or upload a smaller video.",
+                icon="⚠️",
+            )
+            st.stop()
 
     # Path traversal protection: strip directory components and special characters from stem
     raw_stem = Path(uploaded_file.name).stem
@@ -724,6 +1155,16 @@ else:
     try:
         # Retrieve video metadata via ffprobe
         metadata = extract_video_metadata(source_temp_path, original_filename=uploaded_file.name)
+
+        # Video duration limit safeguard
+        if metadata.duration_seconds > DEFAULT_MAX_VIDEO_DURATION_SECONDS:
+            st.error(
+                f"Video duration ({metadata.duration_formatted}) exceeds maximum studio limit of "
+                f"{format_duration(DEFAULT_MAX_VIDEO_DURATION_SECONDS)}. "
+                "Please upload a shorter clip or episode.",
+                icon="⚠️",
+            )
+            st.stop()
 
         # Inspector metrics bar
         st.markdown(
@@ -1171,23 +1612,27 @@ else:
                     if not selected_candidates:
                         st.warning("Please select at least one highlight candidate moment above.", icon="⚠️")
                     else:
-                        status_batch = st.status("🎬 Rendering clips with local FFmpeg...", expanded=True)
+                        try:
+                            with acquire_job_slot(timeout=10.0):
+                                status_batch = st.status("🎬 Rendering clips with local FFmpeg...", expanded=True)
 
-                        def batch_progress_cb(msg: str):
-                            status_batch.write(f"• {msg}")
+                                def batch_progress_cb(msg: str):
+                                    status_batch.write(f"• {msg}")
 
-                        batch_results = batch_create_clips(
-                            source_path=source_temp_path,
-                            candidates=selected_candidates,
-                            output_dir=EXPORTS_DIR,
-                            max_duration=metadata.duration_seconds,
-                            generate_subtitles=gen_subs_batch,
-                            burn_subtitles=burn_subs_batch and gen_subs_batch,
-                            framing_config=batch_framing_config,
-                            progress_callback=batch_progress_cb,
-                        )
-                        st.session_state["batch_clips_created"] = batch_results
-                        status_batch.update(label="✅ Batch Rendering Complete!", state="complete", expanded=False)
+                                batch_results = batch_create_clips(
+                                    source_path=source_temp_path,
+                                    candidates=selected_candidates,
+                                    output_dir=EXPORTS_DIR,
+                                    max_duration=metadata.duration_seconds,
+                                    generate_subtitles=gen_subs_batch,
+                                    burn_subtitles=burn_subs_batch and gen_subs_batch,
+                                    framing_config=batch_framing_config,
+                                    progress_callback=batch_progress_cb,
+                                )
+                                st.session_state["batch_clips_created"] = batch_results
+                                status_batch.update(label="✅ Batch Rendering Complete!", state="complete", expanded=False)
+                        except CapacityExceededError as err:
+                            st.warning(f"⏳ {err}", icon="⏳")
 
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1222,12 +1667,12 @@ else:
                         st.markdown(
                             f"""
                             <div class="studio-card">
-                                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; margin-bottom:10px;">
-                                    <div style="font-size:1.15rem; font-weight:700; color:#F8FAFC;">
-                                        <span style="color:var(--cf-primary);">Clip #{c_idx:02d}:</span> {c_info.get('title')}
+                                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; margin-bottom:14px;">
+                                    <div style="font-family:var(--cf-font-serif); font-size:1.35rem; font-weight:400; color:var(--cf-text-primary);">
+                                        <span style="opacity:0.6;">#{c_idx:02d}</span> {c_info.get('title')}
                                     </div>
-                                    <div class="telemetry-chip">
-                                        ⏱️ DURATION: {c_info.get('duration'):.1f}s
+                                    <div class="liquid-badge">
+                                        DURATION: {c_info.get('duration'):.1f}s
                                     </div>
                                 </div>
                             """,
@@ -1378,8 +1823,8 @@ else:
         if clip_duration > 0:
             st.markdown(
                 f"""
-                <div class="telemetry-chip" style="margin-bottom:12px;">
-                    ⏱️ SELECTED DURATION: <span style="color:var(--cf-cyan-bright);">{clip_duration:.2f}s</span> ({format_duration(clip_duration)})
+                <div class="liquid-badge" style="display:inline-block; margin-bottom:12px;">
+                    SELECTED DURATION: {clip_duration:.2f}s ({format_duration(clip_duration)})
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1483,47 +1928,50 @@ else:
 
             with st.spinner("Processing clip with FFmpeg..."):
                 try:
-                    created_clip = create_video_clip(
-                        input_path=source_temp_path,
-                        output_path=export_path,
-                        start_time=start_time,
-                        end_time=end_time,
-                        max_duration=metadata.duration_seconds,
-                    )
-                    st.session_state["latest_clip"] = str(created_clip)
-                    st.session_state["latest_clip_srt"] = None
-                    st.session_state["latest_clip_subtitled"] = None
-                    st.session_state["latest_clip_reframed"] = None
-                    st.session_state["latest_clip_reframed_subtitled"] = None
+                    with acquire_job_slot(timeout=10.0):
+                        created_clip = create_video_clip(
+                            input_path=source_temp_path,
+                            output_path=export_path,
+                            start_time=start_time,
+                            end_time=end_time,
+                            max_duration=metadata.duration_seconds,
+                        )
+                        st.session_state["latest_clip"] = str(created_clip)
+                        st.session_state["latest_clip_srt"] = None
+                        st.session_state["latest_clip_subtitled"] = None
+                        st.session_state["latest_clip_reframed"] = None
+                        st.session_state["latest_clip_reframed_subtitled"] = None
 
-                    srt_path = None
-                    if manual_gen_subs:
-                        from src.subtitles import burn_subtitles_to_video, transcription_registry
-                        transcriber = transcription_registry.get_provider()
-                        if transcriber and transcriber.is_available():
-                            trans_res = transcriber.transcribe(created_clip)
-                            if trans_res.has_speech:
-                                srt_path = export_path.with_suffix(".srt")
-                                srt_path.write_text(trans_res.to_srt(offset_secs=0.0), encoding="utf-8")
-                                st.session_state["latest_clip_srt"] = str(srt_path)
+                        srt_path = None
+                        if manual_gen_subs:
+                            from src.subtitles import burn_subtitles_to_video, transcription_registry
+                            transcriber = transcription_registry.get_provider()
+                            if transcriber and transcriber.is_available():
+                                trans_res = transcriber.transcribe(created_clip)
+                                if trans_res.has_speech:
+                                    srt_path = export_path.with_suffix(".srt")
+                                    srt_path.write_text(trans_res.to_srt(offset_secs=0.0), encoding="utf-8")
+                                    st.session_state["latest_clip_srt"] = str(srt_path)
 
-                                if manual_burn_subs:
-                                    sub_path = export_path.with_name(f"{export_path.stem}_subtitled.mp4")
-                                    burn_subtitles_to_video(created_clip, srt_path, sub_path)
-                                    st.session_state["latest_clip_subtitled"] = str(sub_path)
+                                    if manual_burn_subs:
+                                        sub_path = export_path.with_name(f"{export_path.stem}_subtitled.mp4")
+                                        burn_subtitles_to_video(created_clip, srt_path, sub_path)
+                                        st.session_state["latest_clip_subtitled"] = str(sub_path)
 
-                    if manual_framing_config.is_reframe_needed():
-                        suffix = manual_framing_config.get_suffix()
-                        m_reframed = export_path.with_name(f"{export_path.stem}{suffix}.mp4")
-                        reframe_video(created_clip, m_reframed, manual_framing_config)
-                        st.session_state["latest_clip_reframed"] = str(m_reframed)
+                        if manual_framing_config.is_reframe_needed():
+                            suffix = manual_framing_config.get_suffix()
+                            m_reframed = export_path.with_name(f"{export_path.stem}{suffix}.mp4")
+                            reframe_video(created_clip, m_reframed, manual_framing_config)
+                            st.session_state["latest_clip_reframed"] = str(m_reframed)
 
-                        if manual_burn_subs and srt_path and srt_path.is_file():
-                            m_ref_sub = export_path.with_name(f"{export_path.stem}{suffix}_subtitled.mp4")
-                            reframe_video(created_clip, m_ref_sub, manual_framing_config, srt_path=srt_path)
-                            st.session_state["latest_clip_reframed_subtitled"] = str(m_ref_sub)
+                            if manual_burn_subs and srt_path and srt_path.is_file():
+                                m_ref_sub = export_path.with_name(f"{export_path.stem}{suffix}_subtitled.mp4")
+                                reframe_video(created_clip, m_ref_sub, manual_framing_config, srt_path=srt_path)
+                                st.session_state["latest_clip_reframed_subtitled"] = str(m_ref_sub)
 
-                    st.success(f"Clip created successfully: **{export_path.name}**", icon="🎉")
+                        st.success(f"Clip created successfully: **{export_path.name}**", icon="🎉")
+                except CapacityExceededError as err:
+                    st.warning(f"⏳ {err}", icon="⏳")
                 except (TimestampValidationError, VideoClipperError, Exception) as err:
                     st.error(f"Clipping failed: {err}", icon="🚨")
 
